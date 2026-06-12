@@ -1,0 +1,492 @@
+# Day 6: Testing & Quality
+
+## Learning Objectives
+
+By the end of today, you will:
+- Write unit tests with mocking
+- Write integration tests against real database
+- Understand test-driven development (TDD)
+- Measure code coverage
+- Know what to test and what not to test
+- Follow Ellume Core testing patterns
+
+---
+
+## Part 0: Testing Philosophy (1 hour)
+
+### 0.1 What to Test
+
+**Test these:**
+- Business logic (the "why" decisions)
+- Data validation
+- Error handling
+- Edge cases
+
+**Don't test:**
+- Standard library functions (go/database/sql works fine)
+- External services (use mocks)
+- Simple getters/setters
+- Code with no logic
+
+### 0.2 Test Pyramid
+
+```
+        UI Tests (few)
+           /\
+          /  \
+         /    \
+        /      \
+       /        \
+      / Service  \     (integration tests)
+     /   Tests    \
+    /              \
+   /________________\
+  /                  \
+ /  Unit Tests        \  (many - fast - run often)
+/____________________ \
+```
+
+---
+
+## Part 1: Unit Testing (1.5 hours)
+
+### 1.1 Basic Test Structure
+
+```go
+// In module/user/bl_test.go
+
+package user
+
+import (
+    "context"
+    "errors"
+    "testing"
+)
+
+// Test convention: func Test<FunctionName>(t *testing.T)
+func TestGetUser_Success(t *testing.T) {
+    // Arrange: Set up test data
+    mockRepo := &MockRepository{
+        users: map[string]*User{
+            "user_123": {ID: "user_123", Name: "John"},
+        },
+    }
+    service := NewService(mockRepo, nil)
+
+    // Act: Execute the code being tested
+    user, err := service.GetUser(context.Background(), "user_123")
+
+    // Assert: Verify the result
+    if err != nil {
+        t.Fatalf("Expected no error, got %v", err)
+    }
+    if user.Name != "John" {
+        t.Errorf("Expected name John, got %s", user.Name)
+    }
+}
+
+func TestGetUser_NotFound(t *testing.T) {
+    mockRepo := &MockRepository{users: make(map[string]*User)}
+    service := NewService(mockRepo, nil)
+
+    user, err := service.GetUser(context.Background(), "nonexistent")
+
+    if err == nil {
+        t.Fatal("Expected error for nonexistent user")
+    }
+    if user != nil {
+        t.Errorf("Expected nil user, got %v", user)
+    }
+}
+```
+
+### 1.2 Mock Objects
+
+```go
+// In module/user/mocks_test.go
+
+package user
+
+import "context"
+
+// MockRepository implements Repository interface
+type MockRepository struct {
+    users map[string]*User
+}
+
+func (m *MockRepository) GetByID(ctx context.Context, id string) (*User, error) {
+    if user, ok := m.users[id]; ok {
+        return user, nil
+    }
+    return nil, errors.New("not found")
+}
+
+func (m *MockRepository) Create(ctx context.Context, user *User) error {
+    m.users[user.ID] = user
+    return nil
+}
+
+func (m *MockRepository) ListByTenant(ctx context.Context) ([]*User, error) {
+    users := []*User{}
+    for _, u := range m.users {
+        users = append(users, u)
+    }
+    return users, nil
+}
+
+// MockLogger
+type MockLogger struct {
+    messages []string
+}
+
+func (m *MockLogger) Info() *zerolog.Event {
+    return zerolog.New(io.Discard).Info()
+}
+
+// Or use testing/iotest
+```
+
+### 1.3 Table-Driven Tests
+
+```go
+// Test multiple scenarios efficiently
+
+func TestValidateEmail(t *testing.T) {
+    tests := []struct {
+        name    string
+        email   string
+        wantErr bool
+    }{
+        {"Valid email", "user@example.com", false},
+        {"Missing @", "userexample.com", true},
+        {"Missing domain", "user@", true},
+        {"Empty string", "", true},
+    }
+
+    for _, tt := range tests {
+        t.Run(tt.name, func(t *testing.T) {
+            err := ValidateEmail(tt.email)
+            if (err != nil) != tt.wantErr {
+                t.Errorf("ValidateEmail() error = %v, wantErr %v", err, tt.wantErr)
+            }
+        })
+    }
+}
+```
+
+### 1.4 Using testify/assert
+
+```go
+// Ellume Core often uses testify for assertions
+
+import (
+    "testing"
+    "github.com/stretchr/testify/assert"
+    "github.com/stretchr/testify/require"
+)
+
+func TestUserService_GetUser(t *testing.T) {
+    mockRepo := &MockRepository{}
+    service := NewService(mockRepo)
+
+    user, err := service.GetUser(context.Background(), "123")
+
+    // assert: test continues even if assertion fails
+    assert.NoError(t, err)
+    assert.Equal(t, "John", user.Name)
+
+    // require: test stops if assertion fails
+    require.NotNil(t, user)
+    require.Equal(t, "123", user.ID)
+}
+```
+
+---
+
+## Part 2: Integration Testing (1.5 hours)
+
+### 2.1 Integration Test Setup
+
+```go
+// In module/user/dl_integration_test.go
+
+//go:build integration
+// +build integration
+
+package user
+
+import (
+    "context"
+    "database/sql"
+    "os"
+    "testing"
+    "ellume-core/pkg/logger"
+    "ellume-core/pkg/provider"
+)
+
+// Integration tests run against real database
+// Run with: go test -tags=integration ./module/user/
+
+func setupIntegrationTest(t *testing.T) (*DataLayer, *sql.DB) {
+    t.Helper()
+
+    // Get database from environment (set by local-integration-test.sh)
+    dsn := os.Getenv("POSTGRES_TEST_DSN")
+    if dsn == "" {
+        dsn = os.Getenv("DATABASE_DSN")
+    }
+
+    // Connect to database
+    db, err := sql.Open("postgres", dsn)
+    require.NoError(t, err)
+
+    // Verify connection
+    err = db.Ping()
+    require.NoError(t, err)
+
+    // Create DL
+    dl := &DataLayer{db: db}
+
+    return dl, db
+}
+
+func TestCreate_Integration(t *testing.T) {
+    if testing.Short() {
+        t.Skip("Skipping integration test")
+    }
+
+    dl, db := setupIntegrationTest(t)
+    defer db.Close()
+
+    // Cleanup after test
+    defer db.Exec("DELETE FROM users WHERE id = $1", "test_user_123")
+
+    // Create test user
+    ctx := context.Background()
+    user := &User{
+        ID:       "test_user_123",
+        Name:     "Integration Test",
+        Email:    "test@example.com",
+        TenantID: "test_tenant",
+    }
+
+    err := dl.Create(ctx, user)
+    require.NoError(t, err)
+
+    // Verify it was created
+    retrieved, err := dl.GetByID(ctx, "test_user_123")
+    require.NoError(t, err)
+    assert.Equal(t, "Integration Test", retrieved.Name)
+}
+```
+
+### 2.2 Running Tests
+
+```bash
+# Unit tests only
+go test ./module/user
+
+# With coverage
+go test -cover ./module/user
+
+# Generate coverage report
+go test -coverprofile=coverage.out ./module/user
+go tool cover -html=coverage.out  # Open in browser
+
+# Integration tests only
+go test -tags=integration ./module/user/...
+
+# Specific test
+go test -run TestCreate_Integration ./module/user
+
+# Verbose
+go test -v ./module/user
+```
+
+### 2.3 Using the devops scripts
+
+```bash
+# Run all tests with coverage
+./devops/local-test.sh
+
+# Run specific package
+./devops/local-test.sh -p ./module/user
+
+# Integration tests
+./devops/local-integration-test.sh
+
+# Keep test database for inspection
+./devops/local-integration-test.sh --skip-cleanup
+```
+
+---
+
+## Part 3: Test-Driven Development (1 hour)
+
+### 3.1 TDD Cycle
+
+```
+1. RED: Write test that fails
+   - Test code that doesn't exist yet
+   - Test is specific and clear
+
+2. GREEN: Write minimal code to pass test
+   - Don't over-engineer
+   - Make the test pass
+
+3. REFACTOR: Clean up code
+   - Extract functions
+   - Reduce duplication
+   - Improve clarity
+```
+
+### 3.2 TDD Example
+
+```go
+// Step 1: RED - Write test for code that doesn't exist
+func TestCalculateUserScore_Integration(t *testing.T) {
+    service := NewUserService(mockRepo)
+
+    score, err := service.CalculateUserScore(context.Background(), "user_123")
+
+    require.NoError(t, err)
+    assert.Equal(t, 150, score)  // Test expects score of 150
+}
+
+// Step 2: GREEN - Implement minimum to pass test
+func (s *UserService) CalculateUserScore(ctx context.Context, userID string) (int, error) {
+    return 150, nil  // Hardcoded - test passes!
+}
+
+// Step 3: REFACTOR - Implement properly
+func (s *UserService) CalculateUserScore(ctx context.Context, userID string) (int, error) {
+    user, err := s.repo.GetByID(ctx, userID)
+    if err != nil {
+        return 0, err
+    }
+
+    // Actual calculation
+    score := len(user.Activities) * 10 + user.Points
+    return score, nil
+}
+```
+
+---
+
+## Part 4: Coverage and Quality (1 hour)
+
+### 4.1 Code Coverage
+
+```bash
+# Generate coverage
+go test -coverprofile=coverage.out ./module/user
+
+# View coverage by function
+go tool cover -func=coverage.out
+
+# Open in browser
+go tool cover -html=coverage.out
+
+# Check threshold
+go test -coverprofile=coverage.out ./module/user
+COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print int($3)}')
+if [ $COVERAGE -lt 80 ]; then
+    echo "Coverage below 80%: $COVERAGE%"
+    exit 1
+fi
+```
+
+### 4.2 Healthy Coverage
+
+**Targets:**
+- Overall: 70-80% (more than enough)
+- Business logic: 90%+
+- Handlers: 70%
+- Data layers: 80%+
+
+**Don't aim for 100%** - some code doesn't need testing:
+- Simple getters
+- Error cases from external libraries
+- Platform-specific code
+
+### 4.3 Linting and Quality
+
+```bash
+# Format code
+go fmt ./...
+
+# Lint for common issues
+go vet ./...
+
+# More thorough linting
+go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+golangci-lint run ./...
+
+# Run before committing
+go fmt ./...
+go vet ./...
+go test ./...
+```
+
+---
+
+## Exercise 6: Write Tests
+
+Write tests for Exercise 5 code:
+
+```go
+// exercise_6_test.go
+
+// Requirements:
+// [ ] Unit tests with mocks (minimum 5 tests)
+// [ ] At least one integration test
+// [ ] Table-driven tests
+// [ ] Error cases
+// [ ] Coverage > 80%
+// [ ] No lint warnings
+```
+
+---
+
+## Daily Assignment
+
+### Complete test coverage for a module
+
+Create tests for the user module:
+- [ ] Unit tests for all business logic functions
+- [ ] Mock repository and logger
+- [ ] Integration tests for data layer
+- [ ] Table-driven tests for validation
+- [ ] Coverage > 80%
+- [ ] All tests pass
+- [ ] Code formatted and vetted
+
+---
+
+## Self-Assessment
+
+Before Day 7:
+
+1. Can you write a unit test with mocks?
+2. Can you set up an integration test?
+3. Do you understand the TDD cycle?
+4. Can you read and interpret coverage reports?
+5. Can you identify untested code?
+
+---
+
+## Tomorrow's Preview
+
+Day 7 will be practical:
+- Make your first real code change
+- Run tests to verify it works
+- Submit your first PR
+- Understand code review feedback
+
+---
+
+**Resources:**
+- [Go Testing Package](https://pkg.go.dev/testing)
+- [Testify Library](https://github.com/stretchr/testify)
+- [Go Code Review Comments](https://github.com/golang/go/wiki/CodeReviewComments)
+- [Ellume Core Testing Patterns](../../CLAUDE.md#testing-patterns)
