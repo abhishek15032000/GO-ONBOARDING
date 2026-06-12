@@ -1,0 +1,646 @@
+# Day 2: Database & Data Persistence
+
+## Learning Objectives
+
+By the end of today, you will:
+- Understand relational databases and SQL fundamentals
+- Know how to work with PostgreSQL and TimescaleDB
+- Understand the provider pattern for database abstraction
+- Write data layer code using sqlx
+- Create and manage database migrations
+- Write integration tests against a real database
+
+---
+
+## Part 0: Database Fundamentals (1.5 hours)
+
+### Theory: Why Databases?
+
+A database is persistent, organized storage for data. Key concepts:
+- **Tables**: Collections of related data (like structs in Go)
+- **Columns**: Fields with types (like struct fields)
+- **Rows**: Individual records
+- **Primary Keys**: Unique identifiers
+- **Foreign Keys**: Relationships between tables
+
+### SQL Basics: The Language
+
+```sql
+-- CREATE: Make a table
+CREATE TABLE users (
+    id SERIAL PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    email VARCHAR(100) UNIQUE,
+    age INT CHECK (age >= 0),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- INSERT: Add data
+INSERT INTO users (name, email, age)
+VALUES ('John', 'john@example.com', 30);
+
+-- SELECT: Read data
+SELECT * FROM users WHERE age > 25;
+SELECT name, email FROM users WHERE id = 1;
+
+-- UPDATE: Modify data
+UPDATE users SET age = 31 WHERE id = 1;
+
+-- DELETE: Remove data
+DELETE FROM users WHERE id = 1;
+
+-- JOIN: Combine tables
+SELECT users.name, orders.total
+FROM users
+JOIN orders ON users.id = orders.user_id;
+```
+
+### 0.1 TimescaleDB: PostgreSQL with Time-Series Powers
+
+TimescaleDB is PostgreSQL with time-series superpowers:
+
+```sql
+-- Create a regular table (like PostgreSQL)
+CREATE TABLE readings (
+    time TIMESTAMP NOT NULL,
+    device_id VARCHAR(50),
+    value DOUBLE PRECISION,
+    FOREIGN KEY (device_id) REFERENCES devices(id)
+);
+
+-- Convert to TimescaleDB hypertable (optimized for time-series)
+SELECT create_hypertable('readings', 'time');
+
+-- Time-based queries (super fast!)
+SELECT AVG(value) FROM readings
+WHERE time > NOW() - INTERVAL '1 day'
+GROUP BY device_id;
+
+-- Compression (save disk space)
+ALTER TABLE readings SET (
+    timescaledb.compress,
+    timescaledb.compress_orderby = 'time DESC'
+);
+```
+
+### 0.2 Connect to Local Database
+
+```bash
+# Verify database is running
+docker ps | grep timescaledb
+
+# Connect using psql
+docker exec -it ellume-timescaledb psql -U ellume -d ellume_core
+
+# In psql:
+\dt          -- List tables
+\d users     -- Describe table
+SELECT * FROM users LIMIT 10;  -- View data
+\q           -- Exit
+```
+
+---
+
+## Part 1: SQL and Query Building (2 hours)
+
+### 1.1 Writing SQL Queries in Go
+
+```go
+package main
+
+import (
+    "database/sql"
+    "fmt"
+)
+
+// Simple query with sqlx
+func getUserByID(db *sql.DB, id string) {
+    // Row represents a single result
+    var name, email string
+    row := db.QueryRow(
+        "SELECT name, email FROM users WHERE id = $1",
+        id,  // $1 is parameter placeholder (prevents SQL injection)
+    )
+
+    if err := row.Scan(&name, &email); err != nil {
+        fmt.Println("Error:", err)
+        return
+    }
+
+    fmt.Printf("User: %s (%s)\n", name, email)
+}
+
+// Query multiple rows
+func getAllUsers(db *sql.DB) ([]string, error) {
+    rows, err := db.Query("SELECT name FROM users ORDER BY created_at")
+    if err != nil {
+        return nil, err
+    }
+    defer rows.Close()  // CRITICAL: Always close row sets
+
+    var names []string
+    for rows.Next() {
+        var name string
+        if err := rows.Scan(&name); err != nil {
+            return nil, err
+        }
+        names = append(names, name)
+    }
+
+    // Always check for errors from iteration
+    if err := rows.Err(); err != nil {
+        return nil, err
+    }
+
+    return names, nil
+}
+
+// Insert data
+func createUser(db *sql.DB, name, email string) (int64, error) {
+    result, err := db.Exec(
+        "INSERT INTO users (name, email) VALUES ($1, $2)",
+        name, email,
+    )
+    if err != nil {
+        return 0, fmt.Errorf("insert failed: %w", err)
+    }
+
+    return result.LastInsertId()
+}
+```
+
+### 1.2 Squirrel: Query Builder
+
+In Ellume Core, we use Squirrel for safe, readable query building:
+
+```go
+import sq "github.com/Masterminds/squirrel"
+
+// Build SELECT safely
+query, args, _ := sq.Select("id", "name", "email").
+    From("users").
+    Where(sq.Gt{"age": 18}).
+    OrderBy("created_at DESC").
+    Limit(10).
+    ToSql()
+
+// Equivalent to:
+// SELECT id, name, email FROM users WHERE age > $1 ORDER BY created_at DESC LIMIT 10
+// args: [18]
+
+// INSERT
+query, args, _ := sq.Insert("users").
+    Columns("name", "email", "age").
+    Values("John", "john@example.com", 30).
+    ToSql()
+
+// UPDATE with WHERE
+query, args, _ := sq.Update("users").
+    Set("age", 31).
+    Set("updated_at", time.Now()).
+    Where(sq.Eq{"id": "123"}).
+    ToSql()
+
+// DELETE with WHERE
+query, args, _ := sq.Delete("users").
+    Where(sq.Eq{"id": "123"}).
+    ToSql()
+```
+
+### 1.3 Multi-tenant Queries (Critical in Ellume Core)
+
+**EVERY query must include tenant_id in WHERE clause:**
+
+```go
+// CORRECT: Include tenant_id
+func GetUsersByTenant(ctx context.Context, tenantID string) {
+    tenantID, err := middleware.GetTenantIDFromContext(ctx)
+    if err != nil {
+        return nil, err
+    }
+
+    query, args, _ := sq.Select("id", "name").
+        From("users").
+        Where(sq.Eq{"tenant_id": tenantID}).  // CRITICAL
+        ToSql()
+
+    // Execute query...
+}
+
+// WRONG: Missing tenant_id filter
+// query, args, _ := sq.Select("id", "name").
+//     From("users").  // Exposes all users!
+//     ToSql()
+```
+
+---
+
+## Part 2: The Provider Pattern (1.5 hours)
+
+### 2.1 Understanding Providers
+
+A **provider** is an abstraction for a backend service:
+
+```go
+// In pkg/provider/database.go
+
+// Interface: what we depend on (contract)
+type DatabaseProvider interface {
+    Connect(ctx context.Context) (*sql.DB, error)
+    DB() *sql.DB
+    Close() error
+    Name() string
+}
+
+// Concrete implementation: how we do it
+type PostgreSQLProvider struct {
+    config *Config
+    db     *sql.DB
+}
+
+func (p *PostgreSQLProvider) Connect(ctx context.Context) (*sql.DB, error) {
+    db, err := sql.Open("postgres", p.config.DSN)
+    if err != nil {
+        return nil, err
+    }
+    p.db = db
+    return db, nil
+}
+
+func (p *PostgreSQLProvider) DB() *sql.DB {
+    return p.db
+}
+
+func (p *PostgreSQLProvider) Close() error {
+    return p.db.Close()
+}
+```
+
+### 2.2 Why Providers Matter
+
+```go
+// Without providers (tightly coupled):
+func GetUser(id string) {
+    db := sql.Open("postgres", "...")  // Hardcoded!
+    // Query...
+}
+// Problem: Can't test, can't switch databases
+
+// With providers (loosely coupled):
+type UserRepository struct {
+    db DatabaseProvider  // Depends on interface, not implementation
+}
+
+func (r *UserRepository) GetUser(id string) {
+    r.db.DB().QueryRow(...)
+}
+
+// In tests: Use mock provider
+// In production: Use PostgreSQL provider
+```
+
+### 2.3 Ellume Core Provider Usage
+
+```go
+// In inithandler/providers.go
+func InitProviders(cfg *config.Config) (DatabaseProvider, AuthProvider) {
+    // Database
+    dbProvider := dbProvider.NewPostgreSQLProvider(&dbProvider.Config{
+        Driver: cfg.Database.Driver,
+        DSN:    cfg.Database.DSN,
+    })
+
+    // Auth
+    var authProvider authProvider.AuthProvider
+    switch cfg.Auth.Provider {
+    case "firebase":
+        authProvider = authProvider.NewFirebaseProvider(...)
+    case "cognito":
+        authProvider = authProvider.NewCognitoProvider(...)
+    default:
+        authProvider = authProvider.NewMockProvider()
+    }
+
+    return dbProvider, authProvider
+}
+```
+
+---
+
+## Part 3: Data Layer Architecture (1.5 hours)
+
+### 3.1 The Three-Layer Pattern
+
+Ellume Core uses this pattern in every module:
+
+```
+HTTP Handler
+    ↓ (passes data)
+Business Logic
+    ↓ (queries/updates)
+Data Layer (Repository)
+    ↓ (uses SQL)
+Database
+```
+
+### 3.2 Writing a Data Layer (DL)
+
+```go
+// In module/user/dl.go (Data Layer)
+
+package user
+
+import (
+    "context"
+    "database/sql"
+    "fmt"
+)
+
+// Repository interface defines what the DL can do
+type Repository interface {
+    GetByID(ctx context.Context, id string) (*User, error)
+    Create(ctx context.Context, user *User) error
+    Update(ctx context.Context, user *User) error
+}
+
+// User entity (matches database row)
+type User struct {
+    ID        string
+    Name      string
+    Email     string
+    TenantID  string
+    CreatedAt time.Time
+}
+
+// Concrete implementation
+type DataLayer struct {
+    db DatabaseProvider
+}
+
+func NewRepository(db DatabaseProvider) Repository {
+    return &DataLayer{db: db}
+}
+
+// GetByID: Single user by ID (with tenant isolation)
+func (dl *DataLayer) GetByID(ctx context.Context, id string) (*User, error) {
+    tenantID, err := middleware.GetTenantIDFromContext(ctx)
+    if err != nil {
+        return nil, err
+    }
+
+    query := `
+        SELECT id, name, email, tenant_id, created_at
+        FROM users
+        WHERE id = $1 AND tenant_id = $2
+    `
+
+    var user User
+    if err := dl.db.DB().QueryRowContext(ctx, query, id, tenantID).
+        Scan(&user.ID, &user.Name, &user.Email, &user.TenantID, &user.CreatedAt); err != nil {
+        if err == sql.ErrNoRows {
+            return nil, fmt.Errorf("user not found")
+        }
+        return nil, fmt.Errorf("query error: %w", err)
+    }
+
+    return &user, nil
+}
+
+// Create: Insert new user
+func (dl *DataLayer) Create(ctx context.Context, user *User) error {
+    tenantID, err := middleware.GetTenantIDFromContext(ctx)
+    if err != nil {
+        return err
+    }
+
+    query := `
+        INSERT INTO users (id, name, email, tenant_id, created_at)
+        VALUES ($1, $2, $3, $4, $5)
+    `
+
+    _, err = dl.db.DB().ExecContext(
+        ctx, query,
+        user.ID, user.Name, user.Email, tenantID, time.Now(),
+    )
+    if err != nil {
+        return fmt.Errorf("insert failed: %w", err)
+    }
+
+    return nil
+}
+```
+
+---
+
+## Part 4: Migrations (1 hour)
+
+### 4.1 Understanding Migrations
+
+Migrations are **version-controlled SQL scripts** that evolve your schema:
+
+```
+database/
+├── migrations.go   <- Define all migrations here
+└── init_database.go  <- Run migrations on startup
+```
+
+### 4.2 Writing Migrations in Ellume Core
+
+```go
+// In database/migrations.go
+
+func GetMigrations() []string {
+    return []string{
+        // Migration 1: Users table
+        `
+        CREATE TABLE users (
+            id VARCHAR(50) PRIMARY KEY,
+            name VARCHAR(255) NOT NULL,
+            email VARCHAR(255) UNIQUE,
+            tenant_id VARCHAR(50) NOT NULL REFERENCES tenants(id),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX idx_users_tenant ON users(tenant_id);
+        `,
+
+        // Migration 2: Add status column
+        `
+        ALTER TABLE users ADD COLUMN status VARCHAR(20) DEFAULT 'active';
+        `,
+
+        // Migration 3: Create hypertable for time-series
+        `
+        CREATE TABLE device_readings (
+            time TIMESTAMP NOT NULL,
+            device_id VARCHAR(50) NOT NULL,
+            value DOUBLE PRECISION,
+            FOREIGN KEY (device_id) REFERENCES devices(id)
+        );
+        SELECT create_hypertable('device_readings', 'time');
+        `,
+    }
+}
+```
+
+### 4.3 Applying Migrations
+
+```go
+// In database/init_database.go
+
+func InitializeDatabase(db *sql.DB) error {
+    migrations := GetMigrations()
+
+    for i, migration := range migrations {
+        if _, err := db.Exec(migration); err != nil {
+            return fmt.Errorf("migration %d failed: %w", i+1, err)
+        }
+    }
+
+    return nil
+}
+```
+
+---
+
+## Exercise 2: Write a Data Layer
+
+Create a file `exercise_2.go`:
+
+```go
+package main
+
+import (
+    "context"
+    "database/sql"
+    "fmt"
+)
+
+// TODO: Implement the Product repository
+
+type Product struct {
+    ID    string
+    Name  string
+    Price float64
+}
+
+type ProductRepository interface {
+    GetByID(ctx context.Context, id string) (*Product, error)
+    ListAll(ctx context.Context) ([]*Product, error)
+    Create(ctx context.Context, product *Product) error
+    UpdatePrice(ctx context.Context, id string, newPrice float64) error
+}
+
+// Implement the interface
+type DataLayer struct {
+    db *sql.DB
+}
+
+func (dl *DataLayer) GetByID(ctx context.Context, id string) (*Product, error) {
+    // TODO: Implement
+}
+
+func (dl *DataLayer) ListAll(ctx context.Context) ([]*Product, error) {
+    // TODO: Implement
+}
+
+func (dl *DataLayer) Create(ctx context.Context, product *Product) error {
+    // TODO: Implement
+}
+
+func (dl *DataLayer) UpdatePrice(ctx context.Context, id string, newPrice float64) error {
+    // TODO: Implement
+}
+```
+
+---
+
+## Integration Test Example
+
+```go
+// In module/user/dl_integration_test.go
+
+//go:build integration
+// +build integration
+
+package user
+
+import (
+    "context"
+    "os"
+    "testing"
+)
+
+func TestGetByID_Integration(t *testing.T) {
+    // Setup
+    dsn := os.Getenv("DATABASE_DSN")
+    db := sql.Open("postgres", dsn)
+    defer db.Close()
+
+    repo := NewRepository(db)
+    ctx := context.Background()
+
+    // Create test user
+    user := &User{ID: "test_1", Name: "John"}
+    if err := repo.Create(ctx, user); err != nil {
+        t.Fatal(err)
+    }
+
+    // Test retrieval
+    retrieved, err := repo.GetByID(ctx, "test_1")
+    if err != nil {
+        t.Fatal(err)
+    }
+
+    if retrieved.Name != "John" {
+        t.Errorf("Expected John, got %s", retrieved.Name)
+    }
+
+    // Cleanup
+    db.Exec("DELETE FROM users WHERE id = $1", "test_1")
+}
+```
+
+---
+
+## Daily Assignment
+
+### Create a complete data layer for a module
+
+Requirements:
+- [ ] Define an entity struct
+- [ ] Create a Repository interface
+- [ ] Implement CRUD operations
+- [ ] Use proper error handling
+- [ ] Include tenant_id in all queries
+- [ ] Write integration tests
+- [ ] Code passes `go fmt` and `go vet`
+
+---
+
+## Self-Assessment
+
+Before moving to Day 3, verify:
+
+1. Can you write a basic SQL SELECT query?
+2. Do you understand why providers are useful?
+3. Can you explain what tenant_id isolation means?
+4. Can you trace data from database → struct → Go code?
+5. Have you successfully run an integration test?
+
+---
+
+## Tomorrow's Preview
+
+Day 3 will cover:
+- HTTP handlers and response writing
+- Routing requests to handlers
+- The middleware stack and order
+- CORS and request validation
+
+---
+
+**Resources:**
+- [sqlx Documentation](https://github.com/jmoiron/sqlx)
+- [Squirrel Query Builder](https://github.com/Masterminds/squirrel)
+- [PostgreSQL Docs](https://www.postgresql.org/docs/)
+- [TimescaleDB Docs](https://docs.timescale.com/)
