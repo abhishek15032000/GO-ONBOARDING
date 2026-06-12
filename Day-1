@@ -1,0 +1,852 @@
+# Day 1: Go Fundamentals & Project Setup
+
+## Learning Objectives
+
+By the end of today, you will:
+- Have a complete development environment ready for Ellume Core
+- Understand Go syntax and how it differs from other languages
+- Master Go's type system, error handling, and interfaces
+- Navigate the ellume-core project structure
+- Run the server and understand the startup sequence
+- Write basic Go programs following project conventions
+
+---
+
+## Part 0: Development Environment Setup (2 hours)
+
+### 0.1 Verify Go Installation
+
+```bash
+# Check Go version (should be 1.24.4 or compatible)
+go version
+
+# If not installed, visit https://go.dev/doc/install
+# macOS: brew install go
+# Linux: https://go.dev/doc/install
+# Windows: https://go.dev/doc/install
+
+# Verify GOPATH and GOROOT
+go env GOPATH
+go env GOROOT
+
+# Download Go module dependencies
+cd /path/to/ellume-core
+go mod download
+go mod verify
+```
+
+### 0.2 Install IDE and Tools
+
+```bash
+# Option 1: VS Code (Recommended)
+# 1. Install from https://code.visualstudio.com/
+# 2. Install Go extension: code --install-extension golang.go
+# 3. Install tools with Ctrl+Shift+P: "Go: Install/Update Tools"
+
+# Option 2: JetBrains GoLand
+# Download from https://www.jetbrains.com/go/
+
+# Option 3: VIM/Neovim with gopls
+# gopls auto-installed by VS Code Go extension
+
+# Verify installation
+which gopls
+go version
+```
+
+### 0.3 Clone and Explore the Repository
+
+```bash
+# Clone the repository
+git clone https://github.com/ellume-tech/ellume-core.git
+cd ellume-core
+
+# List main directories
+ls -la
+
+# View project structure
+tree -L 2 -I 'vendor|.git'
+
+# Check Go modules
+cat go.mod | head -20
+
+# Build the project
+go build ./cmd/server
+# Expected: No errors, creates `server` executable
+
+# Verify executable
+./server -healthcheck
+# Expected: Health check output
+```
+
+### 0.4 Set Up Local Development Database
+
+```bash
+# Start TimescaleDB Docker container (or use local setup script)
+./devops/local-setup.sh
+
+# Verify database is running
+docker ps | grep timescaledb
+
+# Connect to database
+docker exec -it ellume-timescaledb psql -U ellume -d ellume_core
+
+# In psql, run:
+# \dt  (list tables)
+# \q   (exit)
+```
+
+### 0.5 Run the Development Server
+
+```bash
+# Start the server
+./devops/local-run.sh
+
+# Expected output:
+# - Server running on http://localhost:8181
+# - All routes logged
+# - Database connected
+
+# In another terminal, verify it's working:
+curl http://localhost:8181/ellume-core/api/health
+# Expected: {"status":"healthy"}
+
+# Stop the server: Ctrl+C
+```
+
+---
+
+## Part 1: Go Language Fundamentals (2.5 hours)
+
+### Theory: What is Go?
+
+Go is a compiled, statically-typed language designed for simplicity and performance:
+
+| Aspect | Go |
+|--------|-----|
+| **Syntax** | Simple, readable (inspired by C) |
+| **Typing** | Static + inference |
+| **Memory** | Garbage collected |
+| **Concurrency** | Built-in with goroutines |
+| **Compilation** | Single binary, no runtime needed |
+| **Error Handling** | Explicit (no exceptions) |
+
+**Comparison to other languages:**
+
+| Coming from... | Go feels like... |
+|---|---|
+| Java | Like Java without the verbosity |
+| Python | Like Python but compiled and faster |
+| JavaScript | Like JavaScript with static types |
+| C | Much simpler but with GC |
+
+### Mandatory Reading
+
+- [Go Documentation - Getting Started](https://go.dev/doc/tutorial/getting-started) (15 min)
+- [Effective Go](https://go.dev/doc/effective_go) - Read sections on Formatting through Interfaces (30 min)
+
+---
+
+### 1.1 Variables and Types
+
+```go
+package main
+
+import "fmt"
+
+func main() {
+    // Type inference with :=
+    name := "John"           // Inferred as string
+    age := 30                // Inferred as int
+    salary := 50000.50       // Inferred as float64
+    isActive := true         // Inferred as bool
+
+    // Explicit type declaration
+    var firstName string = "Jane"
+    var count int = 42
+    var price float64 = 19.99
+
+    // Short variable declaration (inside functions only)
+    id := "user123"
+
+    // Const - compile-time constant
+    const maxRetries = 3
+    const apiVersion = "1.0"
+
+    // Blank identifier - ignore unused variables
+    _, err := someFunction()
+
+    fmt.Println(name, age, salary, isActive)
+}
+
+func someFunction() (string, error) {
+    return "result", nil
+}
+```
+
+**Key Differences from Other Languages:**
+
+| Feature | Go | Java | Python | JS |
+|---------|-----|------|--------|-----|
+| Type inference | `:= "hello"` | Not standard | `x = "hello"` | `let x = "hello"` |
+| Declaration | `var x string` | `String x;` | `x = ""` | `var x = ""` |
+| Multiple return | `return x, err` | No | No | No |
+| Zero values | `var x int` → 0 | Not really | No | undefined |
+
+### 1.2 Strings and String Operations
+
+```go
+package main
+
+import (
+    "fmt"
+    "strings"
+)
+
+func main() {
+    // String literals
+    name := "Alice"
+    greeting := "Hello, " + name  // Concatenation with +
+
+    // String interpolation using fmt
+    message := fmt.Sprintf("Hello, %s", name)
+    message = fmt.Sprintf("Name: %s, Age: %d", name, 30)
+
+    // Useful string operations
+    text := "  Hello World  "
+    fmt.Println(strings.TrimSpace(text))      // "Hello World"
+    fmt.Println(strings.ToUpper(text))        // "  HELLO WORLD  "
+    fmt.Println(strings.Contains(text, "World")) // true
+    fmt.Println(strings.Split("a,b,c", ","))  // [a b c]
+    fmt.Println(strings.Join([]string{"a", "b"}, ",")) // "a,b"
+
+    // Rune (Unicode character)
+    char := 'A'
+    fmt.Println(char)  // 65 (ASCII value)
+
+    // Byte slice from string
+    bytes := []byte(text)
+    fmt.Println(bytes)
+}
+```
+
+### 1.3 Numbers and Arithmetic
+
+```go
+package main
+
+import "fmt"
+
+func main() {
+    // Integers (different sizes)
+    var count int = 42
+    var age int8 = 30      // -128 to 127
+    var big int64 = 9223372036854775807
+
+    // Floating point
+    price := 19.99
+    pi := 3.14159
+
+    // Arithmetic
+    fmt.Println(5 + 2)      // 7
+    fmt.Println(5 - 2)      // 3
+    fmt.Println(5 * 2)      // 10
+    fmt.Println(5 / 2)      // 2 (integer division)
+    fmt.Println(5.0 / 2)    // 2.5 (float division)
+    fmt.Println(5 % 2)      // 1 (modulo)
+
+    // Type conversion (required in Go)
+    intVal := 42
+    floatVal := float64(intVal)  // int to float64
+    strVal := fmt.Sprintf("%d", intVal)  // int to string
+
+    // Parsing
+    parsed, err := strconv.Atoi("42")  // string to int
+    if err != nil {
+        fmt.Println("Parse error:", err)
+    }
+}
+```
+
+### 1.4 Collections: Arrays, Slices, Maps
+
+```go
+package main
+
+import "fmt"
+
+func main() {
+    // ============ ARRAYS (fixed size) ============
+    var numbers [5]int           // Array of 5 ints, initialized to [0,0,0,0,0]
+    numbers = [5]int{1, 2, 3, 4, 5}
+    fmt.Println(numbers[0])      // 1
+    fmt.Println(len(numbers))    // 5
+
+    // ============ SLICES (dynamic arrays) ============
+    // This is what you'll use most of the time
+    fruits := []string{"apple", "banana", "orange"}
+    fmt.Println(fruits[0])       // "apple"
+    fmt.Println(len(fruits))     // 3
+    fmt.Println(cap(fruits))     // capacity
+
+    // Append to slice
+    fruits = append(fruits, "grape")
+    fmt.Println(fruits)  // [apple banana orange grape]
+
+    // Slice operations
+    subset := fruits[1:3]        // "banana", "orange" (1 inclusive, 3 exclusive)
+    all := fruits[:]             // entire slice
+    from := fruits[2:]           // from index 2 to end
+
+    // Iterate slices
+    for i, fruit := range fruits {
+        fmt.Printf("%d: %s\n", i, fruit)
+    }
+
+    // Make a slice with capacity
+    capacity := make([]int, 10, 20)  // len=10, cap=20
+
+    // ============ MAPS (key-value pairs) ============
+    ages := make(map[string]int)
+    ages["Alice"] = 30
+    ages["Bob"] = 25
+
+    // Direct initialization
+    user := map[string]string{
+        "name": "John",
+        "city": "Boston",
+    }
+
+    // Access
+    fmt.Println(ages["Alice"])   // 30
+    fmt.Println(user["name"])    // "John"
+
+    // Safe access (check if key exists)
+    age, exists := ages["Charlie"]
+    if exists {
+        fmt.Println(age)
+    } else {
+        fmt.Println("Charlie not found")
+    }
+
+    // Iterate maps
+    for key, value := range ages {
+        fmt.Printf("%s: %d\n", key, value)
+    }
+}
+```
+
+---
+
+## Part 2: Functions and Error Handling (2 hours)
+
+### 2.1 Functions
+
+```go
+package main
+
+import "fmt"
+
+// Simple function
+func add(a int, b int) int {
+    return a + b
+}
+
+// Multiple return values (Go idiom)
+func divide(a, b int) (int, error) {
+    if b == 0 {
+        return 0, fmt.Errorf("division by zero")
+    }
+    return a / b, nil
+}
+
+// Named return values
+func swap(a, b string) (first string, second string) {
+    first = b
+    second = a
+    return  // implicit return with named values
+}
+
+// Variadic function (variable arguments)
+func sum(numbers ...int) int {
+    total := 0
+    for _, num := range numbers {
+        total += num
+    }
+    return total
+}
+
+// First-class function (can be assigned to variable)
+type MathFunc func(int, int) int
+
+func apply(fn MathFunc, a, b int) int {
+    return fn(a, b)
+}
+
+func main() {
+    fmt.Println(add(2, 3))      // 5
+
+    result, err := divide(10, 2)
+    if err != nil {
+        fmt.Println("Error:", err)
+    } else {
+        fmt.Println("Result:", result)  // 5
+    }
+
+    x, y := swap("hello", "world")
+    fmt.Println(x, y)  // world hello
+
+    fmt.Println(sum(1, 2, 3, 4, 5))  // 15
+
+    // Function as argument
+    fmt.Println(apply(add, 5, 3))  // 8
+}
+```
+
+### 2.2 Error Handling (Critical in Go)
+
+```go
+package main
+
+import (
+    "errors"
+    "fmt"
+)
+
+// Error handling pattern 1: Return error as last return value
+func readFile(filename string) (string, error) {
+    // Simulate file read
+    if filename == "" {
+        return "", errors.New("filename cannot be empty")
+    }
+    return "file contents", nil
+}
+
+// Error handling pattern 2: Wrap errors with context
+func processData(data string) error {
+    if data == "" {
+        return fmt.Errorf("processing failed: data is empty")
+    }
+    return nil
+}
+
+// Error handling pattern 3: Custom error type
+type ValidationError struct {
+    Field   string
+    Message string
+}
+
+func (e ValidationError) Error() string {
+    return fmt.Sprintf("validation error on %s: %s", e.Field, e.Message)
+}
+
+func main() {
+    // Pattern: Check err immediately
+    content, err := readFile("myfile.txt")
+    if err != nil {
+        fmt.Println("Error:", err)
+        return
+    }
+    fmt.Println("Content:", content)
+
+    // Pattern: Check multiple operations
+    if err := processData("test"); err != nil {
+        fmt.Println("Processing error:", err)
+    }
+
+    // Custom errors
+    customErr := ValidationError{
+        Field:   "email",
+        Message: "invalid format",
+    }
+    fmt.Println(customErr.Error())
+}
+```
+
+**CRITICAL GO PATTERN: `if err != nil`**
+
+This pattern is everywhere in Go:
+
+```go
+// Always check errors immediately
+result, err := someOperation()
+if err != nil {
+    // Handle or return the error
+    return fmt.Errorf("operation failed: %w", err)  // %w wraps errors
+}
+// Continue with result
+```
+
+---
+
+## Part 3: Interfaces and Abstraction (1.5 hours)
+
+### 3.1 Interfaces
+
+```go
+package main
+
+import (
+    "fmt"
+    "io"
+)
+
+// Define an interface (contract)
+type Writer interface {
+    Write(p []byte) (n int, err error)
+}
+
+type Logger interface {
+    Info(msg string)
+    Error(msg string)
+}
+
+// Concrete implementation 1
+type ConsoleLogger struct{}
+
+func (l ConsoleLogger) Info(msg string) {
+    fmt.Println("INFO:", msg)
+}
+
+func (l ConsoleLogger) Error(msg string) {
+    fmt.Println("ERROR:", msg)
+}
+
+// Concrete implementation 2
+type SilentLogger struct{}
+
+func (l SilentLogger) Info(msg string)  {}
+func (l SilentLogger) Error(msg string) {}
+
+// Function that accepts any Logger
+func DoWork(logger Logger) {
+    logger.Info("Starting work")
+    logger.Error("Encountered error")
+    logger.Info("Work done")
+}
+
+func main() {
+    console := ConsoleLogger{}
+    silent := SilentLogger{}
+
+    DoWork(console)  // Prints messages
+    DoWork(silent)   // Silent
+
+    // Go's interface satisfaction is implicit
+    // No need to declare "implements"
+}
+```
+
+**Key Insight:** In Go, you don't declare that a type implements an interface. If it has all the required methods, it automatically implements it. This is called **structural subtyping**.
+
+### 3.2 Embedding (Composition over Inheritance)
+
+```go
+package main
+
+import "fmt"
+
+type Animal struct {
+    Name string
+}
+
+func (a Animal) Speak() string {
+    return fmt.Sprintf("%s makes a sound", a.Name)
+}
+
+// Dog embeds Animal - inherits its fields and methods
+type Dog struct {
+    Animal  // Embedded type
+    Breed   string
+}
+
+// Override the Speak method
+func (d Dog) Speak() string {
+    return fmt.Sprintf("%s barks", d.Name)
+}
+
+func main() {
+    dog := Dog{
+        Animal: Animal{Name: "Buddy"},
+        Breed:  "Golden Retriever",
+    }
+
+    fmt.Println(dog.Speak())  // Buddy barks
+    fmt.Println(dog.Name)     // Buddy (inherited from Animal)
+}
+```
+
+---
+
+## Part 4: Packages and Organization (1 hour)
+
+### 4.1 Package Structure
+
+In Go, organization happens at the **package** level:
+
+```
+myproject/
+├── main.go              # package main (executable)
+├── go.mod              # Module definition
+├── go.sum              # Dependency checksums
+├── internal/
+│   ├── user/
+│   │   ├── user.go     # package user
+│   │   └── user_test.go
+│   └── auth/
+│       └── auth.go      # package auth
+└── pkg/
+    └── logger/
+        └── logger.go    # package logger
+```
+
+### 4.2 Importing and Exporting
+
+```go
+// user.go in internal/user package
+package user
+
+// Exported (capital letter) - can be imported
+type User struct {
+    ID   string
+    Name string
+}
+
+// Exported function
+func (u User) GetDisplayName() string {
+    return u.Name
+}
+
+// Unexported (lowercase) - private to package
+func validateEmail(email string) bool {
+    return true
+}
+
+---
+
+// main.go
+package main
+
+import (
+    "fmt"
+    "myproject/internal/user"
+)
+
+func main() {
+    u := user.User{ID: "1", Name: "John"}
+    fmt.Println(u.GetDisplayName())
+
+    // This would fail:
+    // user.validateEmail("test@test.com")  // Error: validateEmail not exported
+}
+```
+
+### 4.3 Project Structure in Ellume Core
+
+```
+ellume-core/
+├── cmd/server/           # main.go lives here
+├── pkg/                  # Importable packages
+│   ├── config/          # Configuration handling
+│   ├── logger/          # Logger abstraction
+│   ├── middleware/      # HTTP middleware
+│   ├── provider/        # Database & auth providers
+│   └── authorization/   # Authorization utilities
+├── module/              # Business logic (layered)
+│   ├── user/
+│   │   ├── dl.go       # Data Layer
+│   │   ├── bl.go       # Business Logic
+│   │   └── handler.go  # HTTP handlers
+│   └── auth/
+└── database/            # Migrations and schema
+```
+
+**Important:**
+- `pkg/` contains reusable, importable packages
+- `module/` contains business logic organized by feature
+- `internal/` would be used for app-specific code not meant for reuse
+
+---
+
+## Exercise 1: Go Fundamentals
+
+Create a file `exercise_1.go` in a temporary directory:
+
+```go
+package main
+
+import (
+    "fmt"
+)
+
+// TODO: Implement these functions
+
+// 1. Calculate factorial recursively
+func factorial(n int) (int, error) {
+    // Returns factorial and error if n < 0
+}
+
+// 2. Filter slice
+func filterEvenNumbers(numbers []int) []int {
+    // Returns only even numbers
+}
+
+// 3. Merge maps
+func mergeMaps(map1, map2 map[string]string) map[string]string {
+    // Returns merged map (map2 overwrites map1)
+}
+
+func main() {
+    // Test factorial
+    result, _ := factorial(5)
+    fmt.Println(result)  // Expected: 120
+
+    // Test filter
+    nums := []int{1, 2, 3, 4, 5, 6}
+    fmt.Println(filterEvenNumbers(nums))  // Expected: [2 4 6]
+
+    // Test merge
+    map1 := map[string]string{"a": "1", "b": "2"}
+    map2 := map[string]string{"b": "3", "c": "4"}
+    merged := mergeMaps(map1, map2)
+    fmt.Println(merged)  // Expected: map[a:1 b:3 c:4]
+}
+```
+
+---
+
+## Project Navigation Exercise
+
+Now let's explore the actual ellume-core codebase:
+
+```bash
+# 1. Find the main entry point
+grep -r "func main" cmd/
+
+# 2. Look at the logger abstraction
+cat pkg/logger/logger.go
+
+# 3. Check the config structure
+grep -A 20 "type Config struct" pkg/config/config.go
+
+# 4. Explore a module
+ls -la module/user/
+
+# 5. Check the test pattern
+head -20 module/user/*_test.go
+
+# 6. Look at database init
+head -30 database/init_database.go
+```
+
+---
+
+## Self-Assessment Questions
+
+Before moving to Day 2, you should be able to answer:
+
+1. What's the difference between `var`, `:=`, and `const`?
+2. Why does Go require checking `if err != nil`?
+3. How do interfaces in Go work without explicit implementation?
+4. What's the purpose of the `pkg/` directory vs `module/` directory?
+5. What are goroutines used for? (Intro - we'll cover this in async)
+
+---
+
+## Daily Assignment
+
+### Complete Assignment 1 (Due by end of Day 1)
+
+Create a file `day1_assignment.go` that implements a simple CLI tool:
+
+**Requirements:**
+- Read command-line arguments
+- Implement at least 2 functions with proper error handling
+- Use maps and slices appropriately
+- Include comments explaining logic
+- Handle edge cases (empty input, invalid data)
+
+**Example: Word frequency counter**
+```bash
+go run day1_assignment.go file.txt
+# Output: Word frequency in the file
+```
+
+### Submission Checklist
+
+- [ ] Code compiles: `go build day1_assignment.go`
+- [ ] All functions work as expected
+- [ ] Proper error handling with `if err != nil`
+- [ ] Code is formatted: `go fmt day1_assignment.go`
+- [ ] No warnings from: `go vet day1_assignment.go`
+- [ ] Comments explain complex logic
+
+---
+
+## Verify Development Readiness
+
+Before finishing Day 1, verify your setup:
+
+```bash
+# 1. Build the project
+cd /path/to/ellume-core
+go build ./cmd/server
+
+# 2. Run tests
+go test ./...
+
+# 3. Start the server
+./devops/local-run.sh &
+SERVER_PID=$!
+
+# 4. Test the server
+curl http://localhost:8181/ellume-core/api/health
+
+# 5. Stop the server
+kill $SERVER_PID
+```
+
+**If all steps complete successfully, you're ready for Day 2!**
+
+---
+
+## Resources Summary
+
+### Mandatory Reading (Complete Today)
+
+| Resource | Topic | Time |
+|----------|-------|------|
+| [Getting Started](https://go.dev/doc/tutorial/getting-started) | Overview | 15 min |
+| [Effective Go](https://go.dev/doc/effective_go) | Style & patterns | 30 min |
+| [Go Spec - Declarations](https://go.dev/ref/spec#Declarations_and_scope) | Language basics | 20 min |
+
+### Optional Reading
+
+| Resource | Topic |
+|----------|-------|
+| [Go Modules Tutorial](https://go.dev/blog/using-go-modules) | Module system |
+| [Interfaces in Go](https://go.dev/blog/interface-pollution) | Interface design |
+
+### Practice Resources
+
+| Resource | Purpose |
+|----------|---------|
+| [Go Playground](https://go.dev/play) | Quick experimentation |
+| [Go by Example](https://gobyexample.com/) | Practical examples |
+
+---
+
+## Tomorrow's Preview
+
+Day 2 will cover:
+- SQL and database fundamentals
+- TimescaleDB and time-series data
+- The provider pattern for abstraction
+- Writing data layers (DL)
+- Migrations and schema management
+
+Make sure you're comfortable with Go syntax before moving on!
+
+---
+
+**Questions?** Ask your mentor or check CLAUDE.md for more detail on specific patterns.
