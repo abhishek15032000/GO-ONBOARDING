@@ -1,0 +1,649 @@
+# Day 7: Hands-on Contribution & First PR
+
+## Learning Objectives
+
+By the end of today, you will:
+- Make your first real code change to the codebase
+- Run the full test suite
+- Create and push your first pull request
+- Understand the code review process
+- Be ready for real work tickets
+
+---
+
+## Part 0: Development Workflow (1 hour)
+
+### 0.1 Git Workflow
+
+```bash
+# Make sure you're on main and up to date
+git checkout main
+git pull origin main
+
+# Create feature branch (use descriptive name)
+git checkout -b feat/my-feature-description
+
+# Make changes
+# Edit files, add code, write tests
+
+# Stage changes
+git add module/user/handler.go module/user/handler_test.go
+
+# Commit with clear message
+git commit -m "Add user search endpoint
+
+- Implements GET /users/search?q=<query>
+- Filters by tenant_id for security
+- Returns paginated results
+- Includes unit and integration tests"
+
+# Push to remote
+git push -u origin feat/my-feature-description
+
+# Create PR on GitHub
+gh pr create --fill
+# Or go to GitHub and create PR from the branch
+```
+
+### 0.2 Commit Message Convention
+
+```
+# Good: Clear, describes what and why
+git commit -m "Add user search endpoint
+
+Implements full-text search for users in a tenant.
+Addresses feature request #42."
+
+# Bad: Vague
+git commit -m "Fix stuff"
+git commit -m "Update user module"
+git commit -m "WIP"
+```
+
+---
+
+## Part 1: Making Your First Change (2 hours)
+
+### 1.1 Choose a Small Feature
+
+Pick something constrained:
+
+**Good starter tasks:**
+- Add a new query function to data layer
+- Add a new handler for existing module
+- Add validation to existing handler
+- Improve error messages
+- Add missing tests
+
+**Avoid for first PR:**
+- Large refactorings
+- New modules
+- Database schema changes
+- Authentication changes
+
+### 1.2 Implementation Checklist
+
+Before submitting PR:
+
+```bash
+# [ ] Code compiles
+go build ./cmd/server
+
+# [ ] All tests pass
+go test ./...
+
+# [ ] Integration tests pass
+./devops/local-integration-test.sh
+
+# [ ] Code is formatted
+go fmt ./...
+
+# [ ] No lint errors
+go vet ./...
+
+# [ ] Coverage didn't decrease
+go test -cover ./module/<your-module>
+
+# [ ] New tests added for new code
+grep -c "func Test" module/<your-module>/*_test.go
+
+# [ ] Can build and run locally
+./devops/local-run.sh &
+# Test your endpoint
+curl http://localhost:8181/ellume-core/api/...
+
+# [ ] Followed project patterns
+grep -n "tenant_id" module/<your-module>/dl.go | grep WHERE
+
+# [ ] Comments explain non-obvious logic
+grep "^[[:space:]]*//.*TODO" module/<your-module>/*.go
+```
+
+---
+
+## Part 2: Code Review Process (1.5 hours)
+
+### 2.1 Creating a Pull Request
+
+```bash
+# Create PR using GitHub CLI
+gh pr create \
+  --title "Add user search endpoint" \
+  --body "## Summary
+This PR adds full-text search for users.
+
+## Changes
+- Add SearchUsers method to UserRepository
+- Add GET /api/users/search endpoint
+- Filter results by tenant for security
+- Add 15 unit tests, 3 integration tests
+
+## Testing
+- All tests pass locally
+- Coverage: 85% for new code
+
+## Related Issue
+Closes #42"
+
+# Or use interactive mode
+gh pr create --fill
+```
+
+### 2.2 Review Comments and Feedback
+
+When you get review feedback:
+
+```
+REVIEWER COMMENT: "This query doesn't check tenant_id"
+
+YOUR RESPONSE:
+1. Read the comment carefully
+2. Look at the code they referenced
+3. Ask clarifying questions if confused
+4. Make the fix
+5. Commit with good message
+6. Respond to comment with explanation
+```
+
+**Example dialogue:**
+
+```
+Reviewer: "This could use error handling"
+
+You: "I added error handling in commit abc123. Is there a specific case you're concerned about?"
+
+Reviewer: "Looks good now, thanks!"
+
+You: *approves and merges*
+```
+
+### 2.3 Request Changes vs Suggestions
+
+**Request Changes:** Must fix before merge
+- Security issues
+- Breaks existing functionality
+- Violates project patterns
+- Missing tests
+
+**Suggestions:** Nice to have, not blocking
+- Could be more efficient
+- Alternative approach
+- Minor style preference
+
+---
+
+## Part 3: Real Example - Add a Search Feature (2 hours)
+
+Here's a complete walkthrough of adding a small feature:
+
+### 3.1 Understand the Requirement
+
+Let's add user search to the user module:
+
+```
+Endpoint: GET /api/users/search?q=<query>
+Returns: List of users matching query (tenant-scoped)
+```
+
+### 3.2 TDD Approach - Start with Tests
+
+```go
+// module/user/bl_test.go
+
+func TestSearchUsers_MatchesByName(t *testing.T) {
+    mockRepo := &MockRepository{
+        users: map[string]*User{
+            "1": {ID: "1", Name: "John Smith", TenantID: "t1"},
+            "2": {ID: "2", Name: "Jane Doe", TenantID: "t1"},
+        },
+    }
+    service := NewService(mockRepo)
+
+    results, err := service.SearchUsers(
+        context.Background(),
+        "john",
+    )
+
+    require.NoError(t, err)
+    assert.Len(t, results, 1)
+    assert.Equal(t, "John Smith", results[0].Name)
+}
+
+func TestSearchUsers_TenantIsolated(t *testing.T) {
+    mockRepo := &MockRepository{
+        users: map[string]*User{
+            "1": {ID: "1", Name: "John", TenantID: "t1"},
+            "2": {ID: "2", Name: "Jane", TenantID: "t2"},
+        },
+    }
+    service := NewService(mockRepo)
+
+    // Tenant t1 should only see user 1
+    results, err := service.SearchUsers(
+        // Add tenant ID to context
+        context.Background(),
+        "j",
+    )
+
+    require.NoError(t, err)
+    assert.Len(t, results, 1)
+    assert.Equal(t, "John", results[0].Name)
+}
+```
+
+### 3.3 Implement Business Logic
+
+```go
+// module/user/bl.go
+
+func (s *UserService) SearchUsers(
+    ctx context.Context,
+    query string,
+) ([]*User, error) {
+    log := logger.FromContext(ctx)
+
+    // Validate input
+    if query == "" {
+        return []*User{}, nil  // Empty query returns empty list
+    }
+
+    if len(query) < 2 {
+        return nil, errors.New("query must be at least 2 characters")
+    }
+
+    // Call repository
+    users, err := s.repo.Search(ctx, query)
+    if err != nil {
+        log.Error().Err(err).Str("query", query).Msg("Search failed")
+        return nil, fmt.Errorf("search error: %w", err)
+    }
+
+    log.Info().Int("count", len(users)).Str("query", query).Msg("Search completed")
+    return users, nil
+}
+```
+
+### 3.4 Implement Data Layer
+
+```go
+// module/user/dl.go
+
+// Add to Repository interface
+type Repository interface {
+    // ... existing methods ...
+    Search(ctx context.Context, query string) ([]*User, error)
+}
+
+// Implement in DataLayer
+func (dl *DataLayer) Search(ctx context.Context, query string) ([]*User, error) {
+    tenantID, err := middleware.GetTenantIDFromContext(ctx)
+    if err != nil {
+        return nil, err
+    }
+
+    // Use ILIKE for case-insensitive search
+    sqlQuery := `
+        SELECT id, name, email, tenant_id, created_at
+        FROM users
+        WHERE tenant_id = $1 AND (
+            name ILIKE $2 OR email ILIKE $2
+        )
+        ORDER BY name
+        LIMIT 50
+    `
+
+    rows, err := dl.db.DB().QueryContext(
+        ctx, sqlQuery, tenantID, "%"+query+"%",
+    )
+    if err != nil {
+        return nil, fmt.Errorf("query error: %w", err)
+    }
+    defer rows.Close()
+
+    var users []*User
+    for rows.Next() {
+        var user User
+        if err := rows.Scan(
+            &user.ID, &user.Name, &user.Email, &user.TenantID, &user.CreatedAt,
+        ); err != nil {
+            return nil, fmt.Errorf("scan error: %w", err)
+        }
+        users = append(users, &user)
+    }
+
+    if err := rows.Err(); err != nil {
+        return nil, err
+    }
+
+    return users, nil
+}
+
+// Integration test
+func TestSearch_Integration(t *testing.T) {
+    if testing.Short() {
+        t.Skip("integration test")
+    }
+
+    dl, db := setupIntegrationTest(t)
+    defer db.Close()
+    defer db.Exec("DELETE FROM users WHERE tenant_id = $1", "test_tenant")
+
+    // Create test data
+    ctx := context.Background()
+    users := []*User{
+        {ID: "1", Name: "Alice Anderson", Email: "alice@test.com", TenantID: "test_tenant"},
+        {ID: "2", Name: "Bob Smith", Email: "bob@test.com", TenantID: "test_tenant"},
+    }
+
+    for _, u := range users {
+        require.NoError(t, dl.Create(ctx, u))
+    }
+
+    // Search test
+    results, err := dl.Search(ctx, "alice")
+    require.NoError(t, err)
+    assert.Len(t, results, 1)
+    assert.Equal(t, "Alice Anderson", results[0].Name)
+}
+```
+
+### 3.5 Add HTTP Handler
+
+```go
+// module/user/handler.go
+
+type SearchUsersRequest struct {
+    Query string `json:"q"`
+}
+
+func (h *UserHandler) SearchUsers(w http.ResponseWriter, r *http.Request) {
+    log := logger.FromContext(r.Context())
+
+    // Get query parameter
+    query := r.URL.Query().Get("q")
+    if query == "" {
+        http.Error(w, "Missing q parameter", http.StatusBadRequest)
+        return
+    }
+
+    // Call service
+    users, err := h.service.SearchUsers(r.Context(), query)
+    if err != nil {
+        log.Error().Err(err).Msg("Search failed")
+        http.Error(w, "Search failed", http.StatusInternalServerError)
+        return
+    }
+
+    // Return results
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(map[string]interface{}{
+        "results": users,
+        "count":   len(users),
+    })
+}
+```
+
+### 3.6 Register Route
+
+```go
+// In cmd/server/main.go
+
+func setupRouter(modules map[string]interface{}) *http.ServeMux {
+    router := http.NewServeMux()
+
+    userHandler := modules["user"].(*user.Handler)
+
+    // Existing routes
+    router.HandleFunc("GET /api/users/{id}", userHandler.GetUser)
+    router.HandleFunc("POST /api/users", userHandler.CreateUser)
+
+    // New route
+    router.HandleFunc("GET /api/users/search", userHandler.SearchUsers)
+
+    return router
+}
+```
+
+### 3.7 Test Everything
+
+```bash
+# Format
+go fmt ./...
+
+# Lint
+go vet ./...
+
+# Unit tests
+go test ./module/user -v
+
+# Coverage
+go test -cover ./module/user
+
+# Integration tests
+./devops/local-integration-test.sh -p ./module/user
+
+# Manual test
+./devops/local-run.sh &
+curl "http://localhost:8181/api/users/search?q=john"
+# Stop server: kill %1
+```
+
+---
+
+## Part 4: Submitting Your PR (1 hour)
+
+### 4.1 Push Your Changes
+
+```bash
+# Verify everything is working
+go test ./...
+
+# Push to your branch
+git push origin feat/user-search
+
+# Create PR
+gh pr create \
+  --title "Add user search endpoint" \
+  --body "
+## Summary
+Adds full-text search for users with tenant isolation.
+
+## Changes
+- Add Search method to user repository
+- Add SearchUsers endpoint
+- Filters by name and email
+- Case-insensitive search
+
+## Testing
+- 5 new unit tests
+- 1 integration test
+- All tests passing
+- Coverage: 88%
+
+## Related Issue
+Closes #42
+"
+```
+
+### 4.2 Wait for Review
+
+```
+- Someone will review your code in a few hours or days
+- Address feedback promptly
+- Be professional and open to suggestions
+- Ask clarifying questions if needed
+```
+
+### 4.3 Make Requested Changes
+
+```bash
+# Fix based on feedback
+# Edit the file(s)
+git add module/user/handler.go
+
+# Commit with clear message
+git commit -m "Address review feedback
+
+- Add additional validation
+- Improve error messages
+- Add more test cases"
+
+# Push updated code (no new PR, same branch)
+git push origin feat/user-search
+
+# GitHub updates the PR automatically
+```
+
+---
+
+## Part 5: After Merge (Optional - Next Week)
+
+Once your PR is merged:
+
+```bash
+# Switch back to main
+git checkout main
+
+# Get latest
+git pull origin main
+
+# Your changes are now in production!
+```
+
+---
+
+## Self-Assessment Checklist
+
+- [ ] I made a code change to the actual codebase
+- [ ] All tests pass locally
+- [ ] I submitted a PR
+- [ ] I responded to code review feedback
+- [ ] My PR was merged
+- [ ] I understand the workflow for future contributions
+
+---
+
+## Daily Assignment
+
+### Make and submit your first PR
+
+**Requirements:**
+
+✅ **Code Quality**
+- [ ] Follows project patterns from CLAUDE.md
+- [ ] Includes tenant_id checks in all queries
+- [ ] Error handling on all operations
+- [ ] Proper logging at each layer
+
+✅ **Testing**
+- [ ] Unit tests with mocks
+- [ ] Integration tests if data layer
+- [ ] Tests pass locally
+- [ ] Coverage > 80%
+
+✅ **Git & PR**
+- [ ] Meaningful commit messages
+- [ ] PR description explains changes
+- [ ] Links to related issue
+- [ ] Branch pushed to GitHub
+- [ ] PR created
+
+✅ **Code Review**
+- [ ] Address all feedback
+- [ ] Ask clarifying questions
+- [ ] Respond professionally
+- [ ] Respond within 24 hours
+
+---
+
+## Congratulations! 🎉
+
+You've completed the 7-day onboarding program. You should now be able to:
+
+✅ Understand Go fundamentals
+✅ Work with PostgreSQL and migrations
+✅ Write HTTP handlers and middleware
+✅ Implement authentication and authorization
+✅ Navigate the configuration system
+✅ Write unit and integration tests
+✅ Contribute to the codebase
+✅ Follow code review processes
+
+---
+
+## Next Steps
+
+### Week 2: Your First Real Ticket
+
+You're ready to start taking real work:
+
+1. Your mentor will assign you a small ticket (~4 hours)
+2. Follow the same process you used today
+3. Ask questions when stuck
+4. Get code review
+5. Iterate on feedback
+
+### Continuous Learning
+
+- Read other developers' PRs
+- Study the module architecture
+- Ask questions about patterns you don't understand
+- Take notes on gotchas and tips
+
+---
+
+## Resources for Deep Dives
+
+**Go Language:**
+- [Effective Go](https://go.dev/doc/effective_go)
+- [Go Blog](https://go.dev/blog)
+
+**Testing:**
+- [Testing Best Practices](https://go.dev/blog/tdd)
+- [Testify Documentation](https://github.com/stretchr/testify)
+
+**Our Project:**
+- [Ellume Core README](../../README.md)
+- [CLAUDE.md - Complete Reference](../../CLAUDE.md)
+- [Architecture Docs](../../docs/architecture)
+
+---
+
+## Feedback
+
+Please provide feedback on this onboarding program:
+
+1. Which days were most helpful?
+2. Which concepts need more explanation?
+3. What would you change?
+4. Any gotchas we should document?
+
+Your feedback helps us train the next developer!
+
+---
+
+**Welcome to the team!** 🚀
+
+You're now ready to be a productive member of the Ellume Core backend team.
+
+Your first real ticket awaits. Go make something awesome.
