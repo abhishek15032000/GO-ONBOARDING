@@ -1,0 +1,533 @@
+# Day 3: HTTP Handlers & Middleware
+
+## Learning Objectives
+
+By the end of today, you will:
+- Understand HTTP fundamentals and request/response cycles
+- Write handler functions using Go's standard library
+- Understand Ellume Core's routing and handler patterns
+- Build the middleware stack and understand execution order
+- Handle JSON request/response marshaling
+- Manage CORS and request validation
+
+---
+
+## Part 0: HTTP Fundamentals (1 hour)
+
+### 0.1 HTTP Basics
+
+HTTP is request/response based:
+
+```
+Client Request:
+  GET /api/users/123 HTTP/1.1
+  Host: example.com
+  Accept: application/json
+
+Server Response:
+  HTTP/1.1 200 OK
+  Content-Type: application/json
+
+  {"id": "123", "name": "John"}
+```
+
+**HTTP Methods:**
+- **GET**: Retrieve data (safe, idempotent)
+- **POST**: Create data
+- **PUT**: Replace entire resource
+- **PATCH**: Partial update
+- **DELETE**: Remove data
+
+**Status Codes:**
+- **2xx**: Success (200 OK, 201 Created, 204 No Content)
+- **4xx**: Client error (400 Bad Request, 401 Unauthorized, 404 Not Found)
+- **5xx**: Server error (500 Internal Server Error)
+
+---
+
+## Part 1: Go HTTP Handlers (1.5 hours)
+
+### 1.1 Handler Functions
+
+```go
+package main
+
+import (
+    "encoding/json"
+    "fmt"
+    "net/http"
+)
+
+// Handler function signature: func(http.ResponseWriter, *http.Request)
+func helloHandler(w http.ResponseWriter, r *http.Request) {
+    // Write response
+    w.Header().Set("Content-Type", "text/plain")
+    fmt.Fprintf(w, "Hello, World!")
+}
+
+// JSON handler
+type User struct {
+    ID   string `json:"id"`
+    Name string `json:"name"`
+    Email string `json:"email"`
+}
+
+func getUserHandler(w http.ResponseWriter, r *http.Request) {
+    // Check method
+    if r.Method != http.MethodGet {
+        http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+
+    // Get URL parameter
+    userID := r.URL.Query().Get("id")  // /api/user?id=123
+    if userID == "" {
+        http.Error(w, "Missing id parameter", http.StatusBadRequest)
+        return
+    }
+
+    // Create response
+    user := User{ID: userID, Name: "John", Email: "john@example.com"}
+
+    // Marshal to JSON
+    w.Header().Set("Content-Type", "application/json")
+    if err := json.NewEncoder(w).Encode(user); err != nil {
+        http.Error(w, "Encoding error", http.StatusInternalServerError)
+        return
+    }
+}
+
+// POST handler with request body
+func createUserHandler(w http.ResponseWriter, r *http.Request) {
+    if r.Method != http.MethodPost {
+        http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+        return
+    }
+
+    // Parse request body
+    var user User
+    if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
+        http.Error(w, "Invalid JSON", http.StatusBadRequest)
+        return
+    }
+    defer r.Body.Close()
+
+    // Process user...
+    user.ID = "new_id"
+
+    // Return created response
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusCreated)
+    json.NewEncoder(w).Encode(user)
+}
+
+func main() {
+    // Register handlers
+    http.HandleFunc("/hello", helloHandler)
+    http.HandleFunc("/api/user", getUserHandler)
+    http.HandleFunc("/api/user/create", createUserHandler)
+
+    // Start server
+    fmt.Println("Server running on :8080")
+    http.ListenAndServe(":8080", nil)
+}
+```
+
+### 1.2 Handlers with Context
+
+In production, we pass context to track request scope:
+
+```go
+import (
+    "context"
+    "log"
+)
+
+func getUserHandler(w http.ResponseWriter, r *http.Request) {
+    ctx := r.Context()  // Get request context
+
+    // Add to context (for middleware/handlers to use)
+    ctx = context.WithValue(ctx, "requestID", "req_123")
+
+    // Pass context to functions
+    user, err := getUserFromDB(ctx, userID)
+    if err != nil {
+        // Logger can extract requestID from context
+        log.Println(ctx.Value("requestID"), "Error:", err)
+    }
+}
+
+func getUserFromDB(ctx context.Context, id string) (*User, error) {
+    // Can access context values
+    requestID := ctx.Value("requestID")
+    log.Println("Fetching user", id, "for request", requestID)
+
+    // Can use context for cancellation
+    select {
+    case <-ctx.Done():
+        return nil, ctx.Err()  // Request cancelled
+    default:
+    }
+
+    // Query database...
+    return &User{}, nil
+}
+```
+
+---
+
+## Part 2: Ellume Core Handler Pattern (1.5 hours)
+
+### 2.1 Handler Structure in Ellume Core
+
+```go
+// In module/user/handler.go
+
+package user
+
+import (
+    "net/http"
+    "ellume-core/pkg/logger"
+)
+
+// UserHandler wraps dependencies
+type UserHandler struct {
+    service UserService  // Depends on business logic
+    logger  logger.Logger
+}
+
+// NewUserHandler creates a handler
+func NewUserHandler(service UserService) *UserHandler {
+    return &UserHandler{
+        service: service,
+    }
+}
+
+// GetUser handles GET /users/:id
+func (h *UserHandler) GetUser(w http.ResponseWriter, r *http.Request) {
+    // Extract logger from context (added by middleware)
+    log := logger.FromContext(r.Context())
+
+    // Get path parameter
+    userID := r.PathValue("id")  // Go 1.22+ syntax
+    if userID == "" {
+        log.Warn().Msg("Missing user ID")
+        http.Error(w, "User ID required", http.StatusBadRequest)
+        return
+    }
+
+    // Call business logic
+    user, err := h.service.GetUser(r.Context(), userID)
+    if err != nil {
+        log.Error().Err(err).Str("userID", userID).Msg("Failed to get user")
+        http.Error(w, "User not found", http.StatusNotFound)
+        return
+    }
+
+    // Return JSON
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(user)
+}
+
+// CreateUser handles POST /users
+func (h *UserHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
+    log := logger.FromContext(r.Context())
+
+    // Parse request
+    var req CreateUserRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        log.Warn().Err(err).Msg("Invalid request body")
+        http.Error(w, "Invalid request", http.StatusBadRequest)
+        return
+    }
+    defer r.Body.Close()
+
+    // Call business logic
+    user, err := h.service.CreateUser(r.Context(), &req)
+    if err != nil {
+        log.Error().Err(err).Msg("Failed to create user")
+        http.Error(w, "Creation failed", http.StatusInternalServerError)
+        return
+    }
+
+    // Return created
+    w.Header().Set("Content-Type", "application/json")
+    w.WriteHeader(http.StatusCreated)
+    json.NewEncoder(w).Encode(user)
+}
+```
+
+### 2.2 Registering Handlers in main.go
+
+```go
+// In cmd/server/main.go
+
+func main() {
+    // Initialize router
+    router := http.NewServeMux()
+
+    // Initialize modules
+    userService := user.NewService(userRepo)
+    userHandler := user.NewUserHandler(userService)
+
+    // Register handlers
+    router.HandleFunc("GET /ellume-core/api/users/{id}", userHandler.GetUser)
+    router.HandleFunc("POST /ellume-core/api/users", userHandler.CreateUser)
+
+    // Start server
+    http.ListenAndServe(":8181", router)
+}
+```
+
+---
+
+## Part 3: Middleware Stack (1.5 hours)
+
+### 3.1 Understanding Middleware
+
+Middleware wraps handlers to add cross-cutting concerns:
+
+```
+Request
+  ↓
+RecoveryMiddleware (catches panics)
+  ↓
+RequestIDMiddleware (adds request ID to context)
+  ↓
+LoggingMiddleware (logs request/response)
+  ↓
+AuthMiddleware (checks authorization)
+  ↓
+Handler (your code)
+  ↓
+Response
+```
+
+### 3.2 Middleware Pattern
+
+```go
+// In pkg/middleware/middleware.go
+
+type Middleware func(http.Handler) http.Handler
+
+// Add request ID to context
+func RequestIDMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        requestID := uuid.New().String()
+
+        // Add to context
+        ctx := context.WithValue(r.Context(), "requestID", requestID)
+        r = r.WithContext(ctx)
+
+        // Add to response header
+        w.Header().Set("X-Request-ID", requestID)
+
+        // Continue to next handler
+        next.ServeHTTP(w, r)
+    })
+}
+
+// Log all requests
+func LoggingMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        log := logger.FromContext(r.Context())
+
+        // Log request
+        log.Info().
+            Str("method", r.Method).
+            Str("path", r.URL.Path).
+            Msg("Request")
+
+        // Continue to handler
+        next.ServeHTTP(w, r)
+
+        // Log response (after handler completes)
+        log.Info().
+            Str("method", r.Method).
+            Str("path", r.URL.Path).
+            Msg("Response")
+    })
+}
+
+// Catch panics
+func RecoveryMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        defer func() {
+            if err := recover(); err != nil {
+                log := logger.FromContext(r.Context())
+                log.Error().
+                    Interface("panic", err).
+                    Msg("Handler panicked")
+
+                w.Header().Set("Content-Type", "application/json")
+                w.WriteHeader(http.StatusInternalServerError)
+                json.NewEncoder(w).Encode(map[string]string{
+                    "error": "Internal server error",
+                })
+            }
+        }()
+
+        next.ServeHTTP(w, r)
+    })
+}
+
+// Chain middleware (apply them in order)
+func Chain(handler http.Handler, middlewares ...Middleware) http.Handler {
+    // Apply in reverse order (last middleware wraps the handler)
+    for i := len(middlewares) - 1; i >= 0; i-- {
+        handler = middlewares[i](handler)
+    }
+    return handler
+}
+```
+
+### 3.3 Middleware Order in Ellume Core
+
+```go
+// In cmd/server/main.go (typical setup)
+
+router := http.NewServeMux()
+
+// Register routes
+router.HandleFunc("GET /api/users", getUsersHandler)
+
+// Wrap router with middleware (executed in reverse order)
+var handler http.Handler = router
+
+// Last middleware applied = first executed
+handler = middleware.RecoveryMiddleware(handler)      // Outermost
+handler = middleware.RequestIDMiddleware(handler)
+handler = middleware.LoggingMiddleware(handler)
+handler = middleware.CORSMiddleware(handler)          // Innermost
+
+http.ListenAndServe(":8181", handler)
+```
+
+---
+
+## Part 4: CORS and Validation (1 hour)
+
+### 4.1 CORS (Cross-Origin Resource Sharing)
+
+```go
+// In pkg/middleware/cors.go
+
+func CORSMiddleware(next http.Handler) http.Handler {
+    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+        // Set CORS headers
+        w.Header().Set("Access-Control-Allow-Origin", "*")  // Allow all origins
+        w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+        w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+        // Handle preflight request
+        if r.Method == http.MethodOptions {
+            w.WriteHeader(http.StatusOK)
+            return
+        }
+
+        next.ServeHTTP(w, r)
+    })
+}
+```
+
+### 4.2 Request Validation
+
+```go
+// Validate before processing
+type CreateUserRequest struct {
+    Name  string `json:"name"`
+    Email string `json:"email"`
+}
+
+func (req *CreateUserRequest) Validate() error {
+    if req.Name == "" {
+        return errors.New("name is required")
+    }
+    if req.Email == "" {
+        return errors.New("email is required")
+    }
+    if !strings.Contains(req.Email, "@") {
+        return errors.New("invalid email format")
+    }
+    return nil
+}
+
+// In handler
+func (h *UserHandler) CreateUser(w http.ResponseWriter, r *http.Request) {
+    var req CreateUserRequest
+    if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+        http.Error(w, "Invalid JSON", http.StatusBadRequest)
+        return
+    }
+
+    // Validate
+    if err := req.Validate(); err != nil {
+        http.Error(w, err.Error(), http.StatusBadRequest)
+        return
+    }
+
+    // Process...
+}
+```
+
+---
+
+## Exercise 3: HTTP Handlers
+
+Create a file `exercise_3.go` with:
+1. A handler that returns JSON
+2. A handler that accepts POST with validation
+3. Middleware that logs requests
+4. Proper error handling
+
+```go
+// TODO: Implement Product API
+// GET /products - list all
+// POST /products - create
+// GET /products/:id - get one
+// With logging middleware
+```
+
+---
+
+## Daily Assignment
+
+### Build a complete HTTP API
+
+Create handlers and middleware for:
+- [ ] GET /api/resource - list
+- [ ] POST /api/resource - create
+- [ ] GET /api/resource/:id - get one
+- [ ] DELETE /api/resource/:id - delete
+- [ ] Request validation
+- [ ] Error handling
+- [ ] Request logging middleware
+- [ ] CORS support
+
+---
+
+## Self-Assessment
+
+Before Day 4, verify:
+
+1. Can you write a handler that returns JSON?
+2. Do you understand the middleware stack order?
+3. Can you validate request bodies?
+4. Can you extract path parameters?
+
+---
+
+## Tomorrow's Preview
+
+Day 4 will cover:
+- JWT tokens and authentication
+- Auth providers (Firebase, mock)
+- Authorization and tenant isolation
+- Protecting endpoints with authentication
+
+---
+
+**Resources:**
+- [Go net/http Documentation](https://pkg.go.dev/net/http)
+- [Ellume Core Middleware](../../pkg/middleware)
+- [HTTP Status Codes](https://httpwg.org/specs/rfc7231.html#status.codes)
